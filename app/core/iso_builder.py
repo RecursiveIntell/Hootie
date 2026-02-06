@@ -45,6 +45,9 @@ class BuildPipeline(QObject):
                  target_sample_rate: int = 0,
                  target_bit_depth: int = 0,
                  dvda_author_path: str = "dvda-author",
+                 sox_quality: str = "high",
+                 keep_converted_files: bool = False,
+                 temp_root: Optional[str] = None,
                  parent=None):
         super().__init__(parent)
         self._project = project
@@ -53,6 +56,9 @@ class BuildPipeline(QObject):
         self._target_sr = target_sample_rate
         self._target_bd = target_bit_depth
         self._dvda_path = dvda_author_path
+        self._sox_quality = sox_quality
+        self._keep_converted_files = keep_converted_files
+        self._temp_root = temp_root
         self._temp_dir: Optional[str] = None
         self._cancelled = False
         self._conversion_worker: Optional[ConversionWorker] = None
@@ -65,11 +71,25 @@ class BuildPipeline(QObject):
         if self._dvda_worker:
             self._dvda_worker.cancel()
 
+    def stop(self, timeout_ms: int = 3000):
+        """Cancel any running workers and wait briefly for shutdown."""
+        self.cancel()
+        if self._conversion_worker and self._conversion_worker.isRunning():
+            self._conversion_worker.wait(timeout_ms)
+        if self._dvda_worker and self._dvda_worker.isRunning():
+            self._dvda_worker.wait(timeout_ms)
+        self.cleanup()
+
     def start(self):
         """Start the build pipeline."""
+        if self._cancelled:
+            return
         self._run_validation()
 
     def _run_validation(self):
+        if self._cancelled:
+            self.finished_error.emit("Cancelled", "Cancelled by user")
+            return
         self.stage_changed.emit(BuildStage.VALIDATING)
         self.log_line.emit("Validating project...")
 
@@ -98,7 +118,20 @@ class BuildPipeline(QObject):
 
     def _run_conversion(self):
         """Convert any files that need conversion to WAV."""
-        self._temp_dir = tempfile.mkdtemp(prefix="hootie_build_")
+        if self._cancelled:
+            self.finished_error.emit("Cancelled", "Cancelled by user")
+            return
+
+        mkdtemp_kwargs = {"prefix": "hootie_build_"}
+        if self._temp_root:
+            temp_root_path = Path(self._temp_root)
+            try:
+                temp_root_path.mkdir(parents=True, exist_ok=True)
+            except OSError:
+                temp_root_path = None
+            if temp_root_path and temp_root_path.is_dir():
+                mkdtemp_kwargs["dir"] = str(temp_root_path)
+        self._temp_dir = tempfile.mkdtemp(**mkdtemp_kwargs)
         jobs = []
 
         for group in self._project.groups:
@@ -120,6 +153,7 @@ class BuildPipeline(QObject):
                         target_sample_rate=self._target_sr or track.sample_rate,
                         target_bit_depth=self._target_bd or track.bit_depth,
                         track_id=track.id,
+                        sox_quality=self._sox_quality,
                     ))
 
         if not jobs:
@@ -138,9 +172,16 @@ class BuildPipeline(QObject):
         self._conversion_worker.start()
 
     def _on_conversion_done(self, jobs: list[ConversionJob]):
+        if self._cancelled:
+            self._restore_original_paths()
+            self._cleanup_temp_dir()
+            self.finished_error.emit("Cancelled", "Cancelled by user")
+            return
+
         failed = [j for j in jobs if not j.success]
         if failed:
             errors = "\n".join(f"  {j.input_path}: {j.error}" for j in failed)
+            self._cleanup_temp_dir()
             self.finished_error.emit("Conversion", f"Failed to convert:\n{errors}")
             return
 
@@ -156,6 +197,12 @@ class BuildPipeline(QObject):
         self._run_authoring()
 
     def _run_authoring(self):
+        if self._cancelled:
+            self._restore_original_paths()
+            self._cleanup_temp_dir()
+            self.finished_error.emit("Cancelled", "Cancelled by user")
+            return
+
         self.stage_changed.emit(BuildStage.AUTHORING)
         self.log_line.emit("Running dvda-author...")
 
@@ -174,31 +221,39 @@ class BuildPipeline(QObject):
             lambda p: self.progress.emit(0, 0, p.message)
         )
         self._dvda_worker.finished_ok.connect(self._on_authoring_done)
-        self._dvda_worker.finished_error.connect(
-            lambda err: self.finished_error.emit("Authoring", err)
-        )
+        self._dvda_worker.finished_error.connect(self._on_authoring_error)
         self._dvda_worker.start()
 
     def _on_authoring_done(self, output_dir: str):
         self.log_line.emit("DVD-Audio authoring complete")
+        self._restore_original_paths()
+        self._cleanup_temp_dir()
 
-        # Restore original file paths
+        self.stage_changed.emit(BuildStage.COMPLETE)
+        result_path = self._iso_path if self._iso_path else self._output_dir
+        self.finished_ok.emit(result_path)
+
+    def _on_authoring_error(self, error: str):
+        self._restore_original_paths()
+        self._cleanup_temp_dir()
+        stage = "Cancelled" if self._cancelled else "Authoring"
+        self.finished_error.emit(stage, error)
+
+    def _restore_original_paths(self):
         for group in self._project.groups:
             for track in group.tracks:
                 if hasattr(track, "_original_path"):
                     track.file_path = track._original_path
                     del track._original_path
 
-        # Cleanup temp dir
+    def _cleanup_temp_dir(self):
+        if self._keep_converted_files:
+            return
         if self._temp_dir and Path(self._temp_dir).exists():
             shutil.rmtree(self._temp_dir, ignore_errors=True)
             self._temp_dir = None
 
-        self.stage_changed.emit(BuildStage.COMPLETE)
-        result_path = self._iso_path if self._iso_path else self._output_dir
-        self.finished_ok.emit(result_path)
-
     def cleanup(self):
         """Clean up temporary files."""
-        if self._temp_dir and Path(self._temp_dir).exists():
-            shutil.rmtree(self._temp_dir, ignore_errors=True)
+        self._restore_original_paths()
+        self._cleanup_temp_dir()

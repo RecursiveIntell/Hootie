@@ -48,7 +48,7 @@ def detect_drives() -> list[DriveInfo]:
         except (subprocess.TimeoutExpired, OSError):
             pass
 
-        drives.append(DriveInfo(device=dev, name=name, can_write=True))
+        drives.append(DriveInfo(device=dev, name=name, can_write=can_write))
 
     return drives
 
@@ -69,11 +69,20 @@ class BurnWorker(QThread):
     finished_ok = pyqtSignal()
     finished_error = pyqtSignal(str)
 
-    def __init__(self, iso_path: str, device: str, speed: int = 0):
+    def __init__(
+        self,
+        iso_path: str,
+        device: str,
+        speed: int = 0,
+        auto_eject: bool = False,
+        verify_after_burn: bool = False,
+    ):
         super().__init__()
         self._iso_path = iso_path
         self._device = device
         self._speed = speed
+        self._auto_eject = auto_eject
+        self._verify_after_burn = verify_after_burn
         self._cancelled = False
         self._process = None
 
@@ -104,6 +113,8 @@ class BurnWorker(QThread):
                 "-v", "-dao",
                 self._iso_path,
             ]
+            if self._verify_after_burn:
+                cmd.append("-verify")
             if self._speed:
                 cmd.extend([f"speed={self._speed}"])
 
@@ -138,6 +149,17 @@ class BurnWorker(QThread):
             self._process.wait()
 
             if self._process.returncode == 0:
+                if self._auto_eject:
+                    # Best effort: eject is optional and platform-dependent.
+                    try:
+                        subprocess.run(
+                            ["eject", self._device],
+                            capture_output=True,
+                            text=True,
+                            timeout=5,
+                        )
+                    except (subprocess.TimeoutExpired, OSError):
+                        pass
                 self.progress.emit(100, "Burn complete!")
                 self.finished_ok.emit()
             else:

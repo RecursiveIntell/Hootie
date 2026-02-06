@@ -36,6 +36,7 @@ def convert_to_wav(
     output_path: str,
     target_sample_rate: int = 0,
     target_bit_depth: int = 0,
+    sox_quality: str = "high",
 ) -> str:
     """Convert an audio file to WAV using SoX (preferred) or ffmpeg.
 
@@ -54,7 +55,13 @@ def convert_to_wav(
             cmd.extend(["-b", str(target_bit_depth)])
         cmd.append(output_path)
         if target_sample_rate:
-            cmd.extend(["rate", "-v", str(target_sample_rate)])
+            quality_flags = {
+                "low": "-l",
+                "medium": "-m",
+                "high": "-h",
+                "very high": "-v",
+            }
+            cmd.extend(["rate", quality_flags.get(sox_quality, "-h"), str(target_sample_rate)])
     else:
         # Use ffmpeg
         cmd = ["ffmpeg", "-v", "quiet", "-y", "-i", input_path]
@@ -80,12 +87,13 @@ def convert_to_wav(
 class ConversionJob:
     def __init__(self, input_path: str, output_path: str,
                  target_sample_rate: int = 0, target_bit_depth: int = 0,
-                 track_id: str = ""):
+                 track_id: str = "", sox_quality: str = "high"):
         self.input_path = input_path
         self.output_path = output_path
         self.target_sample_rate = target_sample_rate
         self.target_bit_depth = target_bit_depth
         self.track_id = track_id
+        self.sox_quality = sox_quality
         self.success = False
         self.error: Optional[str] = None
 
@@ -117,6 +125,7 @@ class ConversionWorker(QThread):
                 convert_to_wav(
                     job.input_path, job.output_path,
                     job.target_sample_rate, job.target_bit_depth,
+                    job.sox_quality,
                 )
                 job.success = True
             except Exception as e:

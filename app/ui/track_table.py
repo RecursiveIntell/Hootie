@@ -194,6 +194,7 @@ class TrackTable(QWidget):
     tracks_removed = pyqtSignal(list)  # list of track IDs
     tracks_moved_to_group = pyqtSignal(list, str)  # track IDs, target group ID
     track_order_changed = pyqtSignal()
+    tracks_reordered = pyqtSignal(list, int)  # track IDs, target row
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -256,6 +257,17 @@ class TrackTable(QWidget):
             paths = [url.toLocalFile() for url in event.mimeData().urls() if url.toLocalFile()]
             if paths:
                 self.files_dropped.emit(paths)
+                event.acceptProposedAction()
+                return
+        if event.mimeData().hasFormat("application/x-hootie-tracks"):
+            raw = bytes(event.mimeData().data("application/x-hootie-tracks")).decode()
+            track_ids = [tid for tid in raw.split(",") if tid]
+            if track_ids:
+                target_row = self._table.indexAt(event.position().toPoint()).row()
+                if target_row < 0:
+                    target_row = self._model.rowCount()
+                self.tracks_reordered.emit(track_ids, target_row)
+                self.track_order_changed.emit()
                 event.acceptProposedAction()
                 return
         QTableView.dropEvent(self._table, event)

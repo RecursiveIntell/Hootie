@@ -19,6 +19,7 @@ from app.core.audio_probe import probe_file, probe_files, is_supported, SUPPORTE
 from app.ui.group_panel import GroupPanel, ALL_TRACKS_ID
 from app.ui.track_table import TrackTable
 from app.ui.disc_gauge import DiscGauge
+from app.ui.settings_dialog import load_settings
 from app.ui.theme import (
     BG_DARKEST, BG_DARK, BG_MID, BG_LIGHT, BG_LIGHTER,
     TEXT_PRIMARY, TEXT_SECONDARY, TEXT_MUTED, ACCENT_BLUE, ACCENT_ORANGE,
@@ -161,6 +162,8 @@ class MainWindow(QMainWindow):
     def __init__(self, project: Project, parent=None):
         super().__init__(parent)
         self._project = project
+        self._settings = load_settings()
+        self._apply_default_quality_preset()
         self._current_group_id: str = ALL_TRACKS_ID
         self._probe_worker: Optional[ProbeWorker] = None
 
@@ -349,6 +352,7 @@ class MainWindow(QMainWindow):
         self._group_panel.group_renamed.connect(self._rename_group)
         self._group_panel.group_deleted.connect(self._delete_group)
         self._group_panel.group_color_changed.connect(self._change_group_color)
+        self._group_panel.group_reordered.connect(self._reorder_groups)
         splitter.addWidget(self._group_panel)
 
         # Center: Track table
@@ -357,6 +361,7 @@ class MainWindow(QMainWindow):
         self._track_table.track_selected.connect(self._on_track_selected)
         self._track_table.tracks_removed.connect(self._remove_tracks)
         self._track_table.tracks_moved_to_group.connect(self._move_tracks_to_group)
+        self._track_table.tracks_reordered.connect(self._reorder_tracks)
         splitter.addWidget(self._track_table)
 
         # Right: Track details
@@ -383,6 +388,16 @@ class MainWindow(QMainWindow):
 
     def _setup_shortcuts(self):
         pass  # shortcuts are set up via menu actions
+
+    def _apply_default_quality_preset(self):
+        preset = self._settings["general"].get("quality_preset", "KEEP_ORIGINAL")
+        if (
+            self._project.file_path is None
+            and self._project.total_tracks() == 0
+            and self._project.quality_preset == "KEEP_ORIGINAL"
+            and preset
+        ):
+            self._project.quality_preset = preset
 
     # ── Refresh ──
 
@@ -524,6 +539,7 @@ class MainWindow(QMainWindow):
         self._probe_worker.start()
 
     def _on_probe_finished(self, tracks: list[Track], group_id: str):
+        self._probe_worker = None
         if not tracks:
             self._status_bar.showMessage("No valid audio files found")
             return
@@ -531,7 +547,6 @@ class MainWindow(QMainWindow):
         self._project.add_tracks_to_group(group_id, tracks)
         self._refresh()
         self._status_bar.showMessage(f"Added {len(tracks)} track(s)")
-        self._probe_worker = None
 
     def _get_target_group(self) -> Optional[Group]:
         """Get the group to add tracks to."""
@@ -563,14 +578,72 @@ class MainWindow(QMainWindow):
             self._remove_tracks(ids)
 
     def _move_tracks_to_group(self, track_ids: list[str], target_group_id: str):
-        # Find and move each track
+        moved = 0
+        failed = 0
+
         for tid in track_ids:
-            for group in self._project.groups:
-                for i, t in enumerate(group.tracks):
-                    if t.id == tid and group.id != target_group_id:
-                        self._project.move_track(tid, group.id, target_group_id)
-                        break
+            source_group = next(
+                (g for g in self._project.groups if any(t.id == tid for t in g.tracks)),
+                None,
+            )
+            if not source_group or source_group.id == target_group_id:
+                continue
+
+            if self._project.move_track(tid, source_group.id, target_group_id):
+                moved += 1
+            else:
+                failed += 1
+
         self._refresh()
+        if moved:
+            self._show_toast(f"Moved {moved} track(s)", "info")
+        if failed:
+            self._show_toast(
+                f"Could not move {failed} track(s). Target group may be full.",
+                "warning",
+            )
+
+    def _reorder_groups(self, ordered_group_ids: list[str]):
+        if not ordered_group_ids:
+            return
+
+        index = {g.id: g for g in self._project.groups}
+        reordered = [index[gid] for gid in ordered_group_ids if gid in index]
+        if len(reordered) != len(self._project.groups):
+            return
+        if reordered == self._project.groups:
+            return
+
+        self._project.groups = reordered
+        self._project.mark_modified()
+        self._refresh()
+
+    def _reorder_tracks(self, track_ids: list[str], target_row: int):
+        if self._current_group_id == ALL_TRACKS_ID:
+            self._show_toast("Select a group to reorder tracks.", "warning")
+            return
+
+        group = self._project.get_group(self._current_group_id)
+        if not group or not track_ids:
+            return
+
+        moving_ids = set(track_ids)
+        moving = [t for t in group.tracks if t.id in moving_ids]
+        if not moving:
+            return
+
+        remaining = [t for t in group.tracks if t.id not in moving_ids]
+        insert_at = max(0, min(target_row, len(remaining)))
+        reordered = remaining[:insert_at] + moving + remaining[insert_at:]
+
+        if reordered == group.tracks:
+            return
+
+        group.tracks = reordered
+        self._project.mark_modified()
+        self._refresh_track_table()
+        self._update_status()
+        self.setWindowTitle(self._window_title())
 
     # ── Project actions ──
 
@@ -582,12 +655,14 @@ class MainWindow(QMainWindow):
                 QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
             )
             if reply == QMessageBox.StandardButton.Save:
-                self._save_project()
+                if not self._save_project():
+                    return
             elif reply == QMessageBox.StandardButton.Cancel:
                 return
 
         self._project = Project()
         self._project.add_group("Group 1")
+        self._apply_default_quality_preset()
         self._current_group_id = ALL_TRACKS_ID
         self._refresh()
 
@@ -599,7 +674,8 @@ class MainWindow(QMainWindow):
                 QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
             )
             if reply == QMessageBox.StandardButton.Save:
-                self._save_project()
+                if not self._save_project():
+                    return
             elif reply == QMessageBox.StandardButton.Cancel:
                 return
 
@@ -617,31 +693,36 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to open project:\n{e}")
 
-    def _save_project(self):
+    def _save_project(self) -> bool:
         if self._project.file_path:
             try:
                 self._project.save()
                 self._refresh()
                 self._status_bar.showMessage("Project saved", 3000)
+                return True
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to save:\n{e}")
+                return False
         else:
-            self._save_project_as()
+            return self._save_project_as()
 
-    def _save_project_as(self):
+    def _save_project_as(self) -> bool:
         path, _ = QFileDialog.getSaveFileName(
             self, "Save Project As", str(Path.home() / f"{self._project.name}.hoot"),
             "Hootie Projects (*.hoot)",
         )
-        if path:
-            try:
-                self._project.save(path)
-                self._refresh()
-                self._status_bar.showMessage("Project saved", 3000)
-                from app.ui.welcome_screen import save_recent_project
-                save_recent_project(path, self._project.name)
-            except Exception as e:
-                QMessageBox.critical(self, "Error", f"Failed to save:\n{e}")
+        if not path:
+            return False
+        try:
+            self._project.save(path)
+            self._refresh()
+            self._status_bar.showMessage("Project saved", 3000)
+            from app.ui.welcome_screen import save_recent_project
+            save_recent_project(path, self._project.name)
+            return True
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to save:\n{e}")
+            return False
 
     # ── Disc type ──
 
@@ -673,7 +754,10 @@ class MainWindow(QMainWindow):
         try:
             from app.ui.settings_dialog import SettingsDialog
             dialog = SettingsDialog(self)
-            dialog.exec()
+            if dialog.exec():
+                self._settings = load_settings()
+                self._apply_default_quality_preset()
+                self._refresh()
         except ImportError:
             pass
 
@@ -725,8 +809,10 @@ class MainWindow(QMainWindow):
                 QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
             )
             if reply == QMessageBox.StandardButton.Save:
-                self._save_project()
-                event.accept()
+                if self._save_project():
+                    event.accept()
+                else:
+                    event.ignore()
             elif reply == QMessageBox.StandardButton.Discard:
                 event.accept()
             else:

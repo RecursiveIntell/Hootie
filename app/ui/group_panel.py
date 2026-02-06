@@ -109,7 +109,7 @@ class GroupPanel(QWidget):
     group_deleted = pyqtSignal(str)  # group_id
     group_added = pyqtSignal()
     group_color_changed = pyqtSignal(str, str)  # group_id, new_color
-    group_reordered = pyqtSignal(int, int)  # from_index, to_index
+    group_reordered = pyqtSignal(list)  # ordered list of group IDs
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -244,15 +244,15 @@ class GroupPanel(QWidget):
             gid = item.data(Qt.ItemDataRole.UserRole)
             self.group_selected.emit(gid)
 
-    def _on_rows_moved(self):
+    def _on_rows_moved(self, *_args):
         # Rebuild group order from list, skipping "All Tracks" (index 0)
         new_order = []
         for i in range(1, self._list.count()):
             item = self._list.item(i)
             gid = item.data(Qt.ItemDataRole.UserRole)
             new_order.append(gid)
-        # Emit the full new order to parent
-        self.group_reordered.emit(0, 0)
+        if new_order:
+            self.group_reordered.emit(new_order)
 
     def _show_context_menu(self, pos):
         item = self._list.itemAt(pos)

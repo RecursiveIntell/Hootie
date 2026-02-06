@@ -12,8 +12,10 @@ from PyQt6.QtGui import QFont, QTextCursor
 
 from app.models.project import Project
 from app.core.capacity import usage_summary, format_bytes
+from app.core.converter import QualityPreset
 from app.core.iso_builder import BuildPipeline, BuildStage
 from app.core.disc_burner import detect_drives, BurnWorker, get_burn_tool
+from app.ui.settings_dialog import load_settings, save_settings
 from app.ui.theme import (
     BG_DARKEST, BG_DARK, BG_MID, BG_LIGHT, BG_LIGHTER,
     TEXT_PRIMARY, TEXT_SECONDARY, TEXT_MUTED,
@@ -57,6 +59,7 @@ class BurnWizard(QDialog):
     def __init__(self, project: Project, parent=None):
         super().__init__(parent)
         self._project = project
+        self._settings = load_settings()
         self._pipeline: Optional[BuildPipeline] = None
         self._burn_worker: Optional[BurnWorker] = None
         self._iso_path: Optional[str] = None
@@ -333,6 +336,7 @@ class BurnWizard(QDialog):
 
         self._drive_combo = QComboBox()
         self._drive_combo.setMinimumHeight(36)
+        self._drive_combo.currentIndexChanged.connect(self._update_burn_button_state)
         layout.addWidget(self._drive_combo)
 
         # Speed selection
@@ -343,6 +347,10 @@ class BurnWizard(QDialog):
 
         self._speed_combo = QComboBox()
         self._speed_combo.addItems(["Auto", "2x", "4x", "8x"])
+        saved_speed = self._settings["burning"].get("default_speed", "Auto")
+        idx = self._speed_combo.findText(saved_speed)
+        if idx >= 0:
+            self._speed_combo.setCurrentIndex(idx)
         self._speed_combo.setFixedWidth(100)
         speed_layout.addWidget(self._speed_combo)
         speed_layout.addStretch()
@@ -400,10 +408,17 @@ class BurnWizard(QDialog):
         if self._build_iso_check.isChecked():
             self._iso_path = str(Path(self._output_dir) / "dvd_audio.iso")
 
+        preset = QualityPreset.from_key(self._project.quality_preset)
+        temp_root = self._settings["general"].get("temp_dir", "").strip() or None
         self._pipeline = BuildPipeline(
             self._project,
             self._output_dir,
             iso_path=self._iso_path,
+            target_sample_rate=preset.target_sample_rate,
+            target_bit_depth=preset.target_bit_depth,
+            sox_quality=self._settings["conversion"].get("sox_quality", "high"),
+            keep_converted_files=self._settings["conversion"].get("keep_converted_files", False),
+            temp_root=temp_root,
         )
         self._pipeline.stage_changed.connect(self._on_stage_changed)
         self._pipeline.progress.connect(self._on_progress)
@@ -414,7 +429,7 @@ class BurnWizard(QDialog):
 
     def _cancel_build(self):
         if self._pipeline:
-            self._pipeline.cancel()
+            self._pipeline.stop()
         self.reject()
 
     def _on_stage_changed(self, stage: BuildStage):
@@ -474,26 +489,67 @@ class BurnWizard(QDialog):
     # ── Burn ──
 
     def _show_burn_page(self):
+        self._burn_status.setStyleSheet(f"font-size: 13px; color: {TEXT_SECONDARY};")
+        self._burn_status.setText("")
+        self._start_burn_btn.setEnabled(True)
+
         # Refresh drives
         self._drive_combo.clear()
         drives = detect_drives()
         if drives:
             for d in drives:
-                self._drive_combo.addItem(d.display_name, d.device)
+                label = d.display_name if d.can_write else f"{d.display_name} [read-only]"
+                self._drive_combo.addItem(
+                    label,
+                    {"device": d.device, "can_write": d.can_write},
+                )
+            preferred = self._settings["burning"].get("preferred_device", "")
+            if preferred:
+                for i in range(self._drive_combo.count()):
+                    data = self._drive_combo.itemData(i)
+                    if data and data.get("device") == preferred:
+                        self._drive_combo.setCurrentIndex(i)
+                        break
         else:
-            self._drive_combo.addItem("No optical drives found")
-            self._start_burn_btn.setEnabled(False)
+            self._drive_combo.addItem("No optical drives found", None)
 
         tool = get_burn_tool()
         if not tool:
             self._burn_status.setText("No burn tool found (need growisofs or wodim)")
-            self._start_burn_btn.setEnabled(False)
 
+        self._update_burn_button_state()
         self._stack.setCurrentIndex(3)
 
+    def _update_burn_button_state(self):
+        device_info = self._drive_combo.currentData()
+        tool = get_burn_tool()
+        can_start = True
+        status = ""
+
+        if not device_info:
+            can_start = False
+            status = "No optical drives found"
+        elif not device_info.get("can_write", False):
+            can_start = False
+            status = "Selected drive is read-only"
+        elif not tool:
+            can_start = False
+            status = "No burn tool found (need growisofs or wodim)"
+
+        self._start_burn_btn.setEnabled(can_start)
+        if status:
+            self._burn_status.setText(status)
+            self._burn_status.setStyleSheet(f"font-size: 13px; color: {ACCENT_RED};")
+        elif not self._burn_worker or not self._burn_worker.isRunning():
+            self._burn_status.setText("")
+            self._burn_status.setStyleSheet(f"font-size: 13px; color: {TEXT_SECONDARY};")
+
     def _start_burn(self):
-        device = self._drive_combo.currentData()
-        if not device or not self._iso_path:
+        device_info = self._drive_combo.currentData()
+        if not device_info or not self._iso_path:
+            return
+        device = device_info.get("device")
+        if not device:
             return
 
         speed_text = self._speed_combo.currentText()
@@ -501,11 +557,24 @@ class BurnWizard(QDialog):
         if speed_text != "Auto":
             speed = int(speed_text.replace("x", ""))
 
+        self._settings["burning"]["default_speed"] = speed_text
+        self._settings["burning"]["preferred_device"] = device
+        save_settings(self._settings)
+
         self._start_burn_btn.setEnabled(False)
         self._burn_progress.show()
-        self._burn_status.setText("Starting burn...")
+        if self._settings["burning"].get("verify_after_burn", False):
+            self._burn_status.setText("Starting burn (verification requested)...")
+        else:
+            self._burn_status.setText("Starting burn...")
 
-        self._burn_worker = BurnWorker(self._iso_path, device, speed)
+        self._burn_worker = BurnWorker(
+            self._iso_path,
+            device,
+            speed,
+            auto_eject=self._settings["burning"].get("auto_eject", False),
+            verify_after_burn=self._settings["burning"].get("verify_after_burn", False),
+        )
         self._burn_worker.progress.connect(self._on_burn_progress)
         self._burn_worker.finished_ok.connect(self._on_burn_ok)
         self._burn_worker.finished_error.connect(self._on_burn_error)
@@ -520,13 +589,18 @@ class BurnWizard(QDialog):
         self._burn_status.setStyleSheet(f"font-size: 13px; color: {ACCENT_GREEN};")
         self._start_burn_btn.setText("Burn Another Copy")
         self._start_burn_btn.setEnabled(True)
+        self._burn_worker = None
 
     def _on_burn_error(self, error: str):
         self._burn_status.setText(f"Burn failed: {error}")
         self._burn_status.setStyleSheet(f"font-size: 13px; color: {ACCENT_RED};")
         self._start_burn_btn.setEnabled(True)
+        self._burn_worker = None
 
     def closeEvent(self, event):
         if self._pipeline:
-            self._pipeline.cleanup()
+            self._pipeline.stop()
+        if self._burn_worker and self._burn_worker.isRunning():
+            self._burn_worker.cancel()
+            self._burn_worker.wait(3000)
         super().closeEvent(event)
