@@ -53,8 +53,8 @@ It provides a PyQt6 interface on top of `dvda-author`, plus conversion, project 
 ### 1) Clone and set up Python env
 
 ```bash
-git clone <your-repo-url>
-cd hootie
+git clone https://github.com/RecursiveIntell/Hootie.git
+cd Hootie
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
@@ -95,7 +95,7 @@ which dvda-author
 dvda-author --version
 ```
 
-If your build does not support `--version`, `which dvda-author` is still enough to validate detection.
+If your build does not support `--version`, `which dvda-author` confirms only that an executable is on `PATH`. Use the app's preflight and a disposable ISO build to check authoring compatibility.
 
 ## Run
 
@@ -198,10 +198,9 @@ Hootie project files use `.hoot` JSON format and include:
 
 ```bash
 python -m compileall -q main.py app
-pytest -q
 ```
 
-Note: there is currently no bundled automated test suite, so `pytest` may report `no tests ran`.
+There is currently no bundled automated test suite or pytest dependency. `compileall` checks Python syntax only. Validate conversion and ISO authoring using copies of your audio files; an optical burn and playback test are separate hardware checks. Higher-resolution presets cannot restore information missing from the source audio.
 
 ## Troubleshooting
 
@@ -254,4 +253,4 @@ ls /dev/sr*
 
 ## License
 
-See repository license files/policy.
+This checkout does not contain a `LICENSE` file or a package manifest declaring a license.
