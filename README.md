@@ -1,5 +1,7 @@
 # Hootie
 
+<!-- last-verified: 2026-10-24 (README documentation review; first-run GUI not executed) -->
+
 Hootie is a desktop app for authoring DVD-Audio projects from music files.
 
 It provides a PyQt6 interface on top of `dvda-author`, plus conversion, project management, capacity estimation, and optional disc burning.
@@ -112,7 +114,7 @@ python main.py /path/to/project.hoot
 
 ## First Launch and Dependency Check
 
-On first launch, Hootie shows a dependency screen and checks tool availability.
+On first launch, Hootie shows a dependency screen and checks tool availability. Missing required tools do not prevent opening the app: **Continue remains enabled**, but some operations that rely on a missing tool may be unavailable or unable to complete. The dependency screen checks for `dvda-author`, `ffmpeg`, `ffprobe`, and the optional `sox`, `growisofs`, and `wodim` tools.
 
 You can re-run this any time from:
 
