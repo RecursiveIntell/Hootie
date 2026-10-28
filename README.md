@@ -1,5 +1,7 @@
 # Hootie
 
+<!-- last-verified: 2026-10-28 -->
+
 Hootie is a desktop app for authoring DVD-Audio projects from music files.
 
 It provides a PyQt6 interface on top of `dvda-author`, plus conversion, project management, capacity estimation, and optional disc burning.
@@ -112,7 +114,7 @@ python main.py /path/to/project.hoot
 
 ## First Launch and Dependency Check
 
-On first launch, Hootie shows a dependency screen and checks tool availability.
+On first launch, Hootie shows a dependency screen and checks tool availability. The screen reports missing tools but does not install them or block **Continue**; install required tools before using workflows that depend on them.
 
 You can re-run this any time from:
 
